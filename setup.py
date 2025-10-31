@@ -8,6 +8,7 @@ setup(
         'numpy',
         'matplotlib',
         'scipy',
+        'fcwt'
     ],
     author='Jungyoung Kim',
     description='Computational neuroscience tools for spectrum, filtering, correlation, and signal analysis',
