@@ -1,7 +1,7 @@
 # from scipy.signal import welch, butter
 from scipy import signal
 import numpy as np
-
+import fcwt
 
 def compute_spectrum(x, fs, window="boxcar", frange=None, axis=-1):
     """
@@ -101,4 +101,136 @@ def compute_spectrogram(x, fs, t=None, wbin_t=1, mbin_t=0.1, frange=None):
     return f, tp, pxx
     
     
-    
+import numpy as np
+
+def compute_wavelet_spectrogram(
+    x: np.ndarray,
+    fs: float,
+    frange=None,                 # (f0, f1) in Hz; if None, defaults to (lowest, Nyquist)
+    fn: int = 100,               # number of frequency bins
+    axis: int = -1,              # time axis
+    scaling: str = "log",        # "lin" or "log"
+    nthreads: int = None,        # None -> use os.cpu_count()
+    fast: bool = False,           # use optimization plans
+    norm: bool = True,           # normalize time-frequency output
+    mode: str = "power",         # "power" or "amplitude"
+    baseline=None,               # (t_start, t_end) in seconds, optional
+    baseline_mode: str = "none", # "db" | "zscore" | "percent" | "div" | "none"
+    decim: int = 1               # temporal decimation factor
+):
+    """
+    fCWT-based wavelet spectrogram with output shaped [F, T, ...].
+    # https://github.com/fastlib/fCWT/blob/main/tutorial.ipynb
+
+    Args:
+        x: Input array; time must be along `axis`. Any leading/trailing dims are allowed.
+        fs: Sampling rate (Hz).
+        frange: Tuple (f0, f1) in Hz. If None, f0 uses the lowest allowed and f1=Nyquist.
+        fn: Number of frequency bins.
+        axis: Time axis in `x`.
+        scaling: Frequency spacing, "lin" or "log".
+        nthreads: Threads used by fCWT (defaults to os.cpu_count()).
+        fast: Use fCWT optimization plans (may run a planning step).
+        norm: Normalize the output amplitudes (as in fCWT default).
+        mode: "power" (|C|^2) or "amplitude" (|C|).
+        baseline: (t0, t1) seconds for baseline normalization.
+        baseline_mode: 'db' | 'zscore' | 'percent' | 'div' | 'none'.
+        decim: Downsample factor along time for the output.
+
+    Returns:
+        f: (F,) frequency vector in Hz.
+        t: (T',) time vector in seconds (after decimation).
+        S: (F, T', ...) spectrogram (power or amplitude).
+    """
+    try:
+        import fcwt
+    except ImportError as e:
+        raise ImportError("fcwt is not installed. Install with `pip install fCWT`.") from e
+
+    # Ensure array and move time axis to the end for iteration
+    x = np.asarray(x)
+    x = np.moveaxis(x, axis, -1)            # shape: (..., T)
+    orig_shape = x.shape
+    T = orig_shape[-1]
+    lead = int(np.prod(orig_shape[:-1]))    # flatten all non-time dims
+    x_flat = x.reshape(lead, T)             # (N, T) where N is product of other dims
+
+    # Frequencies range
+    if frange is None:
+        f0 = 0.0    # fCWT will clamp to min allowed
+        f1 = fs / 2
+    else:
+        f0, f1 = frange
+
+    # Threads default
+    if nthreads is None:
+        try:
+            import os
+            nthreads = os.cpu_count() or 1
+        except Exception:
+            nthreads = 1
+
+    # Time vector (seconds)
+    t = np.arange(T) / fs
+
+    # Compute CWT channel-by-channel
+    f = None
+    S_list = []
+    for i in range(lead):
+        sig = x_flat[i]
+
+        # fCWT returns (freqs, coeffs) where coeffs is (F, T) complex
+        freqs, coeffs = fcwt.cwt(
+            sig.astype(np.float64, copy=False),
+            fs=fs,
+            f0=f0, f1=f1, fn=fn,
+            nthreads=nthreads,
+            scaling=scaling,
+            fast=fast,
+            norm=norm
+        )
+        if f is None:
+            f = freqs
+
+        if mode == "power":
+            S_list.append(np.abs(coeffs) ** 2)
+        elif mode == "amplitude":
+            S_list.append(np.abs(coeffs))
+        else:
+            raise ValueError("mode must be 'power' or 'amplitude' for fCWT wrapper.")
+
+    # Stack back: (N, F, T) → (F, T, ...)
+    S = np.stack(S_list, axis=0)                # (N, F, T)
+    S = np.moveaxis(S, 1, -1)                   # (N, T, F)
+    S = np.moveaxis(S, -1, 0)                   # (F, N, T)
+    # Now reorder to [F, T, ...]
+    S = np.moveaxis(S, -1, 1)                   # (F, T, N)
+    S = S.reshape((len(f), T) + orig_shape[:-1])  # (F, T, ...)
+
+    # Decimation along time
+    if decim > 1:
+        S = S[:, ::decim, ...]
+        t = t[::decim]
+
+    # Optional baseline normalization (on last time axis=1 in [F, T, ...])
+    if baseline is not None and baseline_mode != "none":
+        t0, t1 = baseline
+        i0 = max(0, int(np.floor(t0 * fs / decim)))
+        i1 = min(S.shape[1], int(np.ceil(t1 * fs / decim)))
+        if i1 <= i0:
+            raise ValueError("Invalid baseline window.")
+        B = S[:, i0:i1, ...]  # (F, Tb, ...)
+        m = np.mean(B, axis=1, keepdims=True)
+        if baseline_mode == "db":
+            S = 10 * np.log10(S / (m + 1e-20))
+        elif baseline_mode == "percent":
+            S = 100 * (S - m) / (m + 1e-20)
+        elif baseline_mode == "div":
+            S = S / (m + 1e-20)
+        elif baseline_mode == "zscore":
+            s = np.std(B, axis=1, keepdims=True) + 1e-20
+            S = (S - m) / s
+        else:
+            raise ValueError("Unknown baseline_mode: {baseline_mode}")
+
+    return f, t, S
