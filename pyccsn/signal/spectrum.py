@@ -65,14 +65,14 @@ def compute_spectrogram(x, fs, t=None, wbin_t=1, mbin_t=0.1, frange=None):
     mbin = int(mbin_t * fs)
     wbin = int(wbin_t * fs)
     
-    if len(x) < wbin:
-        raise ValueError("Length of signal must be greater than the window length.")
-    
     x = np.array(x)
     shrink_axis = False
     if len(np.shape(x)) == 1:
         x = np.expand_dims(x, axis=0)
         shrink_axis = True
+    
+    if np.shape(x)[1] < wbin:
+        raise ValueError("Length of signal (%d) must be greater than wbin (%d)"%(np.shape(x,2), wbin))
     
     if t is None:
         t = np.arange(0, len(x)/fs)
@@ -86,6 +86,7 @@ def compute_spectrogram(x, fs, t=None, wbin_t=1, mbin_t=0.1, frange=None):
     pxx = np.zeros((x.shape[0], num_f, len(nbin_set)))
     for i, n0 in enumerate(nbin_set):
         xseg = x[:, n0:n0+wbin]
+        print("xset shape:", xseg.shape)
         f, pxx[:,:,i] = compute_spectrum(xseg, fs=fs, window="hann", axis=1)
         
     if frange is not None:
