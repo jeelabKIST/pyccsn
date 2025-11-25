@@ -86,7 +86,6 @@ def compute_spectrogram(x, fs, t=None, wbin_t=1, mbin_t=0.1, frange=None):
     pxx = np.zeros((x.shape[0], num_f, len(nbin_set)))
     for i, n0 in enumerate(nbin_set):
         xseg = x[:, n0:n0+wbin]
-        print("xset shape:", xseg.shape)
         f, pxx[:,:,i] = compute_spectrum(xseg, fs=fs, window="hann", axis=1)
         
     if frange is not None:
